@@ -2,11 +2,82 @@
 
 const PENTATONIC_RATIOS = [1, 1.125, 1.25, 1.5, 1.667, 2.0, 2.25, 2.5, 3.0, 3.333];
 
+// Valid 0.1s 8kHz 8-bit unsigned mono PCM silent WAV (44-byte RIFF/WAVE header + 802 bytes of 0x80 silence).
+// Using unmuted silent PCM routes iOS Safari Web Audio through the media playback channel even in Silent Mode.
+export const SILENT_WAV_DATA_URI = `data:audio/wav;base64,UklGRkYDAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YSIDAACA${'gICA'.repeat(267)}`;
+
+interface AudioSessionLike {
+  type: string;
+}
+
+type NavigatorWithAudioSession = Navigator & {
+  audioSession?: AudioSessionLike;
+};
+
+export function configurePlaybackAudioSession(
+  nav: NavigatorWithAudioSession | undefined = typeof navigator !== 'undefined'
+    ? (navigator as NavigatorWithAudioSession)
+    : undefined
+): boolean {
+  if (!nav || !('audioSession' in nav) || !nav.audioSession) {
+    return false;
+  }
+  try {
+    nav.audioSession.type = 'playback';
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export class ChooserAudio {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
+  private keepAliveEl: HTMLAudioElement | null = null;
 
-  public unlock(): void {
+  constructor() {
+    configurePlaybackAudioSession();
+  }
+
+  public attachKeepAliveAudio(el: HTMLAudioElement | null): void {
+    this.keepAliveEl = el;
+  }
+
+  public pauseKeepAlive(): void {
+    if (this.keepAliveEl && !this.keepAliveEl.paused) {
+      try {
+        this.keepAliveEl.pause();
+      } catch {
+        // Ignore pause errors
+      }
+    }
+  }
+
+  public unlock(keepAliveAudio?: HTMLAudioElement | null): void {
+    // Configure playback audio session BEFORE creating or resuming AudioContext (iOS 17+ Silent Mode bypass)
+    configurePlaybackAudioSession();
+
+    if (keepAliveAudio !== undefined) {
+      this.keepAliveEl = keepAliveAudio;
+    }
+
+    // Fallback silent looping HTML5 <audio> trigger to route Web Audio onto iOS media playback channel
+    if (this.keepAliveEl) {
+      try {
+        this.keepAliveEl.loop = true;
+        this.keepAliveEl.muted = false;
+        this.keepAliveEl.volume = 1;
+        if (this.keepAliveEl.paused) {
+          const playPromise = this.keepAliveEl.play();
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(() => {});
+          }
+        }
+      } catch {
+        // Ignore if autoplay policy blocks outside a direct gesture
+      }
+    }
+
     if (typeof window === 'undefined') return;
     const AudioCtx =
       window.AudioContext ||
@@ -39,6 +110,7 @@ export class ChooserAudio {
   private ensureReady(): { ctx: AudioContext; out: GainNode } | null {
     if (!this.ctx || !this.masterGain) return null;
     if (this.ctx.state === 'suspended') {
+      configurePlaybackAudioSession();
       this.ctx.resume().catch(() => {});
     }
     return { ctx: this.ctx, out: this.masterGain };
